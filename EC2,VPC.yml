@@ -1,0 +1,183 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description:
+  VPC-EC2
+
+Parameters:
+  EnableNatGateway:
+    Description: Enable Nat Gateway.
+    Type: String
+    Default: false
+    AllowedValues: [true, false]
+
+Conditions:
+  EnableNatGateway:
+    !Equals [true, !Ref EnableNatGateway]
+
+Resources:
+##### VPC作成 #####
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      Tags:
+        - Key: Name
+          Value: cfn-vpc
+
+##### インターネットゲートウェイ作成 #####
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: cfn-igw
+  
+##### IGWをVPCにアタッチ #####
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+##### パブリックサブネット作成 #####
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: ap-northeast-1a
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.10.0/24
+      Tags:
+        - Key: Name
+          Value: cfn-public-subnet
+
+##### プライベートサブネット作成 #####
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: ap-northeast-1a
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.20.0/24
+      Tags:
+        - Key: Name
+          Value: cfn-private-subnet
+
+##### パブリック用ルートテーブル作成 #####
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: cfn-public-routetable
+
+##### パブリック用ルートテーブルの内容を設定 ##### 
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+##### パブリック用ルートテーブルをサブネットに関連付け #####
+  PubSubRTAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+##### 条件を満たしているならNATゲートウェイ作成 #####
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Condition: EnableNatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+      Tags:
+        - Key: Name
+          Value: cfn-ngw
+
+  ### NATゲートウェイ用のEIP作成 ###
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    Condition: EnableNatGateway
+    Properties:
+      Domain: vpc
+
+##### プライベート用ルートテーブル作成 #####
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: cfn-private-routetable
+
+##### プライベート用ルートテーブルの内容を設定 ##### 
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Condition: EnableNatGateway
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+##### プライベート用ルートテーブルをサブネットに関連付け #####
+  PvtSubRTAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+##### セキュリティグループ作成 #####
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: cfn-sg
+      GroupDescription: CloudFormation-SecurityGroup
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          CidrIp: 124.37.207.16/32
+          FromPort: "22"
+          ToPort: "22"
+        - IpProtocol: tcp
+          CidrIp: 124.37.207.16/32
+          FromPort: "80"
+          ToPort: "80"
+
+##### EC2インスタンス作成 #####
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-030cf0a1edb8636ab # AmazonLinux2
+      KeyName: skyarch-key
+      InstanceType: t2.micro
+      InstanceInitiatedShutdownBehavior: stop
+      Tenancy: default
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: "true"
+          DeviceIndex: "0"
+          SubnetId: !Ref PublicSubnet
+          GroupSet:
+            - !Ref SecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            DeleteOnTermination: true
+            VolumeSize: 10
+      UserData: !Base64 |
+        #!/bin/bash
+        sudo hostnamectl set-hostname Cfn-Instance
+        sudo timedatectl set-timezone Asia/Tokyo
+        sudo echo PS1=\"[\\u@\\h \\t \\W]\\$ \" >> /root/.bashrc
+        sudo echo PS1=\"[\\u@\\h \\t \\W]\\$ \" >> /home/ec2-user/.bashrc
+      Tags:
+        - Key: Name
+          Value: cfn-instance
+
+##### Elastic IP作成 #####
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref EC2Instance
